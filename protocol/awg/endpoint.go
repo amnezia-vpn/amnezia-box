@@ -26,6 +26,8 @@ func RegisterEndpoint(registry *endpoint.Registry) {
 	endpoint.Register(registry, constant.TypeAwg, NewEndpoint)
 }
 
+var _ adapter.InterfaceUpdateListener = (*Endpoint)(nil)
+
 type Endpoint struct {
 	*awg.Device
 	endpoint.Adapter
@@ -222,4 +224,10 @@ func (w *Endpoint) NewConnectionEx(ctx context.Context, conn net.Conn, source M.
 	w.logger.InfoContext(ctx, "inbound connection from ", source)
 	w.logger.InfoContext(ctx, "inbound connection to ", metadata.Destination)
 	w.router.RouteConnectionEx(ctx, conn, metadata, onClose)
+}
+
+func (e *Endpoint) InterfaceUpdated() {
+	if err := e.Device.BindUpdate(); err != nil {
+		e.logger.Error("rebind after interface update: ", err)
+	}
 }

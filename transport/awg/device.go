@@ -86,6 +86,13 @@ func (d *Device) Start(stage adapter.StartStage) error {
 	return d.awgDevice.Up()
 }
 
+func (d *Device) BindUpdate() error {
+	if d.awgDevice == nil {
+		return nil
+	}
+	return d.awgDevice.BindUpdate()
+}
+
 func (d *Device) Close() error {
 	d.awgDevice.Close()
 	return nil
