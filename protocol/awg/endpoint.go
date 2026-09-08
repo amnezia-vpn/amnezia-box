@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	E "github.com/sagernet/sing/common/exceptions"
 	"net"
 	"net/netip"
 
@@ -154,6 +155,37 @@ func genIpcConfig(opts option.AwgEndpointOptions) (string, error) {
 	}
 	if opts.I5 != "" {
 		s += "\ni5=" + opts.I5
+	}
+	if opts.HeaderProtectionKey != "" {
+		keyBytes, err := base64.StdEncoding.DecodeString(opts.HeaderProtectionKey)
+		if err != nil {
+			return "", E.Cause(err, "decode header_protection_key")
+		}
+		s += "\nheader_protection_key=" + hex.EncodeToString(keyBytes)
+	}
+	if opts.ContentPaddingAddition != "" {
+		s += "\ncontent_padding_addition=" + opts.ContentPaddingAddition
+	}
+	if opts.RekeyAfterTime != "" {
+		s += "\nrekey_after_time=" + opts.RekeyAfterTime
+	}
+	if opts.RekeyTimeout != "" {
+		s += "\nrekey_timeout=" + opts.RekeyTimeout
+	}
+	if opts.RejectAfterTime != "" {
+		s += "\nreject_after_time=" + opts.RejectAfterTime
+	}
+	if opts.KeepaliveTimeout != "" {
+		s += "\nkeepalive_timeout=" + opts.KeepaliveTimeout
+	}
+	if opts.MaxHandshakeAttempts != "" {
+		s += "\nmax_handshake_attempts=" + opts.MaxHandshakeAttempts
+	}
+	if opts.RandomTrailers {
+		s += "\nrandom_trailers=true"
+	}
+	if opts.DisableCookies {
+		s += "\ndisable_cookies=true"
 	}
 
 	for _, peer := range opts.Peers {
