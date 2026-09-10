@@ -1,5 +1,9 @@
 # Building Amnezia
 
+Use `Makefile.amnezia` for fork builds. The inherited `Makefile` and
+`cmd/internal/build_libbox/main.go` remain unchanged from the selected upstream
+baseline; Amnezia mobile builds use `cmd/internal/build_amnezia_libbox`.
+
 Run these commands from the source root with Go **1.25.5** on `PATH`. The wrapper
 sets `GOTOOLCHAIN=local` and `GOWORK=off`, so it uses the selected toolchain and
 the checked-in modules. Use `GO=/path/to/go` to select another Go executable
@@ -102,10 +106,12 @@ default); an explicit `LIB_TARGET` still takes precedence.
 
 The wrapper adds only `MOBILE_TAGS=with_awg` to the existing mobile profiles; it
 does not apply the CLI tag list to mobile. It passes the selected version and
-output path to the shared builder and disables implicit copying or moving into
-sibling client repositories. Direct uses of `cmd/internal/build_libbox` retain
-the old version fallback and sibling-copy behavior unless `-version`, `-tags`,
-`-output`, or `-copy=false` are supplied.
+output path to `cmd/internal/build_amnezia_libbox`. This command reuses upstream
+`build_shared` SDK/mobile-tool discovery and writes only the requested output;
+it has no sibling-client copying or moving. Direct invocation requires `-version`
+and `-output`; the wrapper resolves both automatically. Its other flags are
+`-target`, `-platform`, `-tags`, `-debug`, and `-with-tailscale`. The upstream
+`cmd/internal/build_libbox` remains available with its original behavior.
 
 Successful packaging alone does not verify an Android/iOS application's runtime
 behavior. Test the produced library in the consuming application before release.

@@ -30,18 +30,35 @@ side. Review these shared files especially carefully:
 
 - `go.mod`/`go.sum` and the separate `test/` module;
 - AWG registration, options, transport and protocol code;
-- `cmd/internal/build_libbox/main.go`, whose extra version/tag/output hooks
-  preserve the upstream mobile profiles;
 - `README.md` and every `.github/workflows/` file.
 
 New upstream workflow files can bypass guards in existing files. Inspect their
 triggers, permissions, secrets and publishing destinations before merging a sync
 PR or switching the default branch. Keep Amnezia-specific commands and docs in
-`Makefile.amnezia`, `scripts/amnezia/` and `docs/amnezia/` to limit shared edits.
+`Makefile.amnezia`, `cmd/internal/build_amnezia_libbox`, `scripts/amnezia/` and
+`docs/amnezia/` to limit shared edits.
+
+The inherited `Makefile` and `cmd/internal/build_libbox/main.go` are kept identical
+to the selected upstream baseline. Amnezia's thin mobile command reuses upstream
+`build_shared.FindSDK`, `FindMobile`, and `GoBinPath`. During every upstream sync,
+compare both the upstream mobile feature profiles and SDK/toolchain requirements
+with the Amnezia command, and check the discovery API for changes. Having no diff
+in the shared build files does not remove profile or API adaptation work. Run
+Amnezia's helper tests and real AAR/XCFramework packaging after adapting them.
 
 Do not rebase, reset, or force-push published `master` or `dev` history. Never use the inherited `make update` target for fork maintenance: it performs destructive reset and clean operations. Publish only a specifically selected Amnezia tag, never all fetched tags.
 
 Before creating a source tag, verify the exact commit, its upstream baseline, the intended version, and all required CI and consumer results. Run this preflight before the tag is published because a later tag workflow cannot retract a version already observed by Go module infrastructure.
+
+## Commit and merge policy
+
+Ordinary feature/fix PRs, including build cleanup, should contain one logical
+commit or use squash merging. Keep intermediate experiments out of the product history. Use regular merges for upstream synchronization, release
+promotion from `dev` to `master`, and the `master`-to-`dev` mergeback so ancestry
+is preserved. Do not squash those history-carrying merges.
+
+Routine cleanup goes through one PR into `dev` and does not itself require a
+release or promotion PR. Existing release tags stay on their verified source commits.
 
 ## Consumer contracts
 
@@ -74,7 +91,8 @@ Use a branch ruleset that requires PRs and these checks on current merge results
 prevents deletion and force pushes, and resolves review conversations. Require
 one approval when another maintainer can review; for a sole maintainer, keep the
 PR and CI requirement without creating an impossible self-approval requirement.
-Do not require linear history: regular merges preserve upstream and PR ancestry.
+Do not require linear history: regular merges preserve upstream synchronization
+and release ancestry, while ordinary feature/fix PRs may use squash.
 
 Protect `v1.*` tags against updates and deletion. A separate creation restriction
 should allow only release maintainers; do not give its bypass actors a bypass

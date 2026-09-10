@@ -34,19 +34,19 @@ build:
 		-o "$(OUTPUT)" ./cmd/sing-box
 
 test:
-	$(GO) test -tags integration ./cmd/internal/read_amnezia_version ./cmd/internal/build_libbox
+	$(GO) test -tags integration ./cmd/internal/read_amnezia_version ./cmd/internal/build_amnezia_libbox
 	$(GO) test $(TEST_ARGS) -tags "$(TEST_TAGS)" $(TEST_PACKAGES)
 
 lib_android: OUTPUT ?= bin/libbox.aar
 lib_android:
 	@version=$$($(READ_VERSION)) || exit $$?; \
-	$(HOST_GO) run ./cmd/internal/build_libbox -target android \
+	$(HOST_GO) run ./cmd/internal/build_amnezia_libbox -target android \
 		-version "$$version" -tags "$(MOBILE_TAGS)" -platform "$(LIB_TARGET)" \
-		-output "$(OUTPUT)" -copy=false $(LIB_FLAGS)
+		-output "$(OUTPUT)" $(LIB_FLAGS)
 
 lib_apple: OUTPUT ?= bin/Libbox.xcframework
 lib_apple:
 	@version=$$($(READ_VERSION)) || exit $$?; \
-	$(HOST_GO) run ./cmd/internal/build_libbox -target apple \
+	$(HOST_GO) run ./cmd/internal/build_amnezia_libbox -target apple \
 		-version "$$version" -tags "$(MOBILE_TAGS)" -platform "$(LIB_TARGET)" \
-		-output "$(OUTPUT)" -copy=false $(LIB_FLAGS)
+		-output "$(OUTPUT)" $(LIB_FLAGS)
