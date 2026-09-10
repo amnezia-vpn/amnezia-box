@@ -14,6 +14,7 @@ env:
 
 jobs:
   build:
+    if: github.repository == 'SagerNet/sing-box'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: true
@@ -85,6 +86,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
   merge:
+    if: github.repository == 'SagerNet/sing-box'
     runs-on: ubuntu-latest
     needs:
       - build

@@ -28,7 +28,16 @@ type AwgEndpointOptions struct {
 	I3               string                           `json:"i3,omitempty"`
 	I4               string                           `json:"i4,omitempty"`
 	I5               string                           `json:"i5,omitempty"`
-	Peers            []AwgPeerOptions                 `json:"peers,omitempty"`
+	HeaderProtectionKey    string           `json:"header_protection_key,omitempty"`
+	ContentPaddingAddition string           `json:"content_padding_addition,omitempty"`
+	RekeyAfterTime         string           `json:"rekey_after_time,omitempty"`
+	RekeyTimeout           string           `json:"rekey_timeout,omitempty"`
+	RejectAfterTime        string           `json:"reject_after_time,omitempty"`
+	KeepaliveTimeout       string           `json:"keepalive_timeout,omitempty"`
+	MaxHandshakeAttempts   string           `json:"max_handshake_attempts,omitempty"`
+	RandomTrailers         bool             `json:"random_trailers,omitempty"`
+	DisableCookies         bool             `json:"disable_cookies,omitempty"`
+	Peers                  []AwgPeerOptions `json:"peers,omitempty"`
 	DialerOptions
 }
 

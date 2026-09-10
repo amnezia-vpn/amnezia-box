@@ -8,7 +8,7 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/amnezia-vpn/amneziawg-go/conn"
+	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -70,6 +70,9 @@ func (b *bind_adapter) Open(port uint16) (fns []conn.ReceiveFunc, actualPort uin
 
 	conn6, err := b.connect(netip.IPv6Unspecified(), port)
 	if err != nil && !errors.Is(err, syscall.EAFNOSUPPORT) {
+		if conn4 != nil {
+			conn4.Close()
+		}
 		return nil, 0, E.Cause(err, "create ipv6 connection")
 	}
 	if conn6 != nil {
@@ -90,11 +93,17 @@ func (b *bind_adapter) Close() error {
 
 	if b.conn4 != nil {
 		err4 = b.conn4.Close()
+		if errors.Is(err4, net.ErrClosed) {
+			err4 = nil
+		}
 		b.conn4 = nil
 	}
 
 	if b.conn6 != nil {
 		err6 = b.conn6.Close()
+		if errors.Is(err6, net.ErrClosed) {
+			err6 = nil
+		}
 		b.conn6 = nil
 	}
 
