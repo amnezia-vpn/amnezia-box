@@ -19,6 +19,7 @@ on:
 jobs:
   calculate_version:
     name: Calculate version
+    if: github.repository == 'SagerNet/sing-box'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.outputs.outputs.version }}
@@ -46,6 +47,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
   build:
     name: Build binary
+    if: github.repository == 'SagerNet/sing-box'
     runs-on: ubuntu-latest
     needs:
       - calculate_version
@@ -165,6 +167,7 @@ jobs:
           path: "dist"
   upload:
     name: Upload builds
+    if: github.repository == 'SagerNet/sing-box'
     runs-on: ubuntu-latest
     needs:
       - calculate_version
