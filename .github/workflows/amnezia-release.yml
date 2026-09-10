@@ -1,0 +1,180 @@
+name: Amnezia source release
+
+on:
+  push:
+    tags:
+      - 'v1.*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: amnezia-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GOTOOLCHAIN: local
+  GOWORK: 'off'
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  verify:
+    name: Verify published source tag
+    if: ${{ github.repository == 'amnezia-vpn/amnezia-box' && !github.event.deleted }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      evidence: ${{ steps.final_preflight.outputs.evidence }}
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.25.5'
+          cache: true
+      - name: Verify tag, ancestry, and exact source CI
+        id: preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          EVENT_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse "${EVENT_SHA}^{commit}")
+          python3 -B scripts/amnezia/release_preflight.py \
+            --repository "$REPOSITORY" --sha "$sha" --tag "$TAG" \
+            --published-tag --output "$RUNNER_TEMP/release-evidence.json"
+          python3 -B - <<'PY'
+          import json, os
+          from pathlib import Path
+          evidence = json.loads((Path(os.environ['RUNNER_TEMP']) / 'release-evidence.json').read_text())
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('evidence=' + json.dumps(evidence, separators=(',', ':')) + '\n')
+              output.write('sha=' + evidence['sha'] + '\n')
+          PY
+      - name: Verify remote Go consumer at published tag
+        env:
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ steps.preflight.outputs.sha }}
+        run: >-
+          python3 -B scripts/amnezia/check_consumer.py remote
+          --repository "$REPOSITORY" --ref "$TAG" --expected-sha "$SOURCE_SHA"
+      - name: Verify fresh submodule consumer at published tag
+        env:
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ steps.preflight.outputs.sha }}
+        run: >-
+          python3 -B scripts/amnezia/check_consumer.py submodule
+          --repository "$REPOSITORY" --ref "$TAG" --expected-sha "$SOURCE_SHA"
+
+      - name: Recheck source and CI after consumer validation
+        id: final_preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ steps.preflight.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B scripts/amnezia/release_preflight.py \
+            --repository "$REPOSITORY" --sha "$SOURCE_SHA" --tag "$TAG" \
+            --published-tag --output "$RUNNER_TEMP/release-evidence.json"
+          python3 -B - <<'PYCODE'
+          import json, os
+          from pathlib import Path
+          evidence = json.loads((Path(os.environ['RUNNER_TEMP']) / 'release-evidence.json').read_text())
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('evidence=' + json.dumps(evidence, separators=(',', ':')) + '\n')
+          PYCODE
+
+  publish:
+    name: Publish source-only release notes
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      EVIDENCE: ${{ needs.verify.outputs.evidence }}
+      REPOSITORY: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Prepare release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PY'
+          import json, os
+          from pathlib import Path
+          evidence = json.loads(os.environ['EVIDENCE'])
+          repository, sha = evidence['repository'], evidence['sha']
+          if repository != os.environ['REPOSITORY'] or evidence['tag'] != os.environ['TAG']:
+              raise SystemExit('release evidence does not match the tag event')
+          consumer_url = f"https://github.com/{repository}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+          notes = [
+              f"<!-- amnezia-source-commit: {sha} -->",
+              f"Source release from `{evidence['channel']}`.", '',
+              f"- Commit: [{sha}](https://github.com/{repository}/commit/{sha})",
+              f"- Upstream baseline: [{evidence['upstream_baseline']}](https://github.com/SagerNet/sing-box/commit/{evidence['upstream_baseline']})",
+              f"- AmneziaWG dependency: `{evidence['awg_version']}`",
+              f"- Go toolchain: `{evidence['go_version']}`",
+              f"- Exact source push CI: [run {evidence['ci']['run_id']}, attempt {evidence['ci']['run_attempt']}]({evidence['ci']['url']})",
+          ]
+          notes.extend(f"- {name}: [passed]({url})" for name, url in evidence['ci']['jobs'].items())
+          notes += [
+              f"- Published-tag remote and submodule consumer builds: [passed]({consumer_url})", '',
+              'This release contains source only. It publishes no CLI binaries, mobile libraries, containers, or store packages.',
+              'Android/iOS application runtime acceptance is separate from source consumer builds.',
+          ]
+          (Path(os.environ['RUNNER_TEMP']) / 'release-notes.md').write_text('\n'.join(notes) + '\n')
+          PY
+      - name: Publish once without changing an existing release
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$REPOSITORY/git/ref/tags/$TAG" > "$RUNNER_TEMP/published-ref.json"
+          python3 -B - <<'PY'
+          import json, os
+          from pathlib import Path
+          evidence = json.loads(os.environ['EVIDENCE'])
+          ref = json.loads((Path(os.environ['RUNNER_TEMP']) / 'published-ref.json').read_text())
+          if ref['object']['type'] != 'tag' or ref['object']['sha'] != evidence['tag_object']:
+              raise SystemExit('published tag object changed after verification')
+          PY
+          if gh release view "$TAG" --repo "$REPOSITORY" \
+              --json tagName,isDraft,isPrerelease,body,url \
+              > "$RUNNER_TEMP/existing-release.json" 2> "$RUNNER_TEMP/release-lookup.err"; then
+            python3 -B - <<'PY'
+          import json, os
+          from pathlib import Path
+          evidence = json.loads(os.environ['EVIDENCE'])
+          existing = json.loads((Path(os.environ['RUNNER_TEMP']) / 'existing-release.json').read_text())
+          marker = f"<!-- amnezia-source-commit: {evidence['sha']} -->"
+          matches = (existing['tagName'] == evidence['tag'] and not existing['isDraft']
+                     and existing['isPrerelease'] == evidence['prerelease']
+                     and marker in existing['body'])
+          if not matches:
+              raise SystemExit('existing release differs from verified evidence; refusing to overwrite it')
+          print('Release already exists; notes preserved: ' + existing['url'])
+          PY
+            exit 0
+          fi
+          sha=$(python3 -B -c 'import json,os; print(json.loads(os.environ["EVIDENCE"])["sha"])')
+          prerelease=$(python3 -B -c 'import json,os; print(str(json.loads(os.environ["EVIDENCE"])["prerelease"]).lower())')
+          gh release create "$TAG" --repo "$REPOSITORY" --verify-tag --target "$sha" \
+            --title "Amnezia $TAG" --notes-file "$RUNNER_TEMP/release-notes.md" \
+            --prerelease="$prerelease"
