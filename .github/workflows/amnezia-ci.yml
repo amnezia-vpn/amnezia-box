@@ -47,7 +47,7 @@ jobs:
           go mod verify
           (cd test && go mod tidy -diff && go mod verify)
       - name: Test build and version helpers
-        run: go test -race -tags integration ./cmd/internal/read_amnezia_version ./cmd/internal/build_libbox
+        run: go test -race -tags integration ./cmd/internal/read_amnezia_version ./cmd/internal/build_amnezia_libbox
       - name: Test release preflight gates
         run: python3 -B -m unittest discover -s scripts/amnezia -p 'test_*.py' -v
       - name: Compile the separate integration module

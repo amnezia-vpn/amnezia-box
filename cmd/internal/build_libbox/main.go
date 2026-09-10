@@ -20,10 +20,6 @@ var (
 	target        string
 	platform      string
 	withTailscale bool
-	buildVersion  string
-	extraTags     string
-	outputPath    string
-	copyToClient  bool
 )
 
 func init() {
@@ -31,29 +27,10 @@ func init() {
 	flag.StringVar(&target, "target", "android", "target platform")
 	flag.StringVar(&platform, "platform", "", "specify platform")
 	flag.BoolVar(&withTailscale, "with-tailscale", false, "build tailscale for iOS and tvOS")
-	flag.StringVar(&buildVersion, "version", "", "override embedded version")
-	flag.StringVar(&extraTags, "tags", "", "additional comma-separated build tags")
-	flag.StringVar(&outputPath, "output", "", "output AAR or XCFramework path")
-	flag.BoolVar(&copyToClient, "copy", true, "copy or move output into sibling clients")
 }
 
 func main() {
 	flag.Parse()
-
-	currentTag := strings.TrimPrefix(buildVersion, "v")
-	if currentTag == "" {
-		var err error
-		currentTag, err = build_shared.ReadTag()
-		if err != nil {
-			currentTag = "unknown"
-		}
-	}
-	configureBuild(currentTag)
-	if outputPath != "" {
-		if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
-			log.Fatal(E.Cause(err, "create output directory"))
-		}
-	}
 
 	build_shared.FindMobile()
 
@@ -62,8 +39,6 @@ func main() {
 		buildAndroid()
 	case "apple":
 		buildApple()
-	default:
-		log.Fatal("unknown target: ", target)
 	}
 }
 
@@ -77,21 +52,21 @@ var (
 	debugTags   []string
 )
 
-func configureBuild(currentTag string) {
-	sharedFlags = []string{"-trimpath", "-buildvcs=false"}
-	sharedFlags = append(sharedFlags, "-ldflags", "-X github.com/sagernet/sing-box/constant.Version="+currentTag+" -s -w -buildid=")
-	debugFlags = []string{"-ldflags", "-X github.com/sagernet/sing-box/constant.Version=" + currentTag}
-
-	sharedTags = []string{"with_gvisor", "with_quic", "with_wireguard", "with_utls", "with_clash_api", "with_conntrack"}
-	for _, tag := range strings.Split(extraTags, ",") {
-		if tag = strings.TrimSpace(tag); tag != "" {
-			sharedTags = append(sharedTags, tag)
-		}
+func init() {
+	sharedFlags = append(sharedFlags, "-trimpath")
+	sharedFlags = append(sharedFlags, "-buildvcs=false")
+	currentTag, err := build_shared.ReadTag()
+	if err != nil {
+		currentTag = "unknown"
 	}
-	darwinTags = []string{"with_dhcp"}
-	memcTags = []string{"with_tailscale"}
-	notMemcTags = []string{"with_low_memory"}
-	debugTags = []string{"debug"}
+	sharedFlags = append(sharedFlags, "-ldflags", "-X github.com/sagernet/sing-box/constant.Version="+currentTag+" -s -w -buildid=")
+	debugFlags = append(debugFlags, "-ldflags", "-X github.com/sagernet/sing-box/constant.Version="+currentTag)
+
+	sharedTags = append(sharedTags, "with_gvisor", "with_quic", "with_wireguard", "with_utls", "with_clash_api", "with_conntrack")
+	darwinTags = append(darwinTags, "with_dhcp")
+	memcTags = append(memcTags, "with_tailscale")
+	notMemcTags = append(notMemcTags, "with_low_memory")
+	debugTags = append(debugTags, "debug")
 }
 
 func buildAndroid() {
@@ -113,121 +88,6 @@ func buildAndroid() {
 		log.Fatal("java version should be openjdk 17")
 	}
 
-	args := androidArgs()
-
-	command := exec.Command(build_shared.GoBinPath+"/gomobile", args...)
-	command.Stdout = os.Stdout
-	command.Stderr = os.Stderr
-	err = command.Run()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	const name = "libbox.aar"
-	nameSource := outputPath
-	if nameSource == "" {
-		nameSource = name
-	}
-	copyPath := filepath.Join("..", "sing-box-for-android", "app", "libs")
-	if copyToClient && rw.IsDir(copyPath) {
-		copyPath, _ = filepath.Abs(copyPath)
-		destination := filepath.Join(copyPath, name)
-		same, err := checkOutputDestination(nameSource, destination)
-		if err != nil {
-			log.Fatal(err)
-		}
-		if same {
-			return
-		}
-		err = rw.CopyFile(nameSource, destination)
-		if err != nil {
-			log.Fatal(err)
-		}
-		log.Info("copied to ", copyPath)
-	}
-}
-
-func buildApple() {
-	args := appleArgs()
-
-	command := exec.Command(build_shared.GoBinPath+"/gomobile", args...)
-	command.Stdout = os.Stdout
-	command.Stderr = os.Stderr
-	err := command.Run()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	copyPath := filepath.Join("..", "sing-box-for-apple")
-	if copyToClient && rw.IsDir(copyPath) {
-		targetDir := filepath.Join(copyPath, "Libbox.xcframework")
-		targetDir, _ = filepath.Abs(targetDir)
-		source := outputPath
-		if source == "" {
-			source = "Libbox.xcframework"
-		}
-		same, err := checkOutputDestination(source, targetDir)
-		if err != nil {
-			log.Fatal(err)
-		}
-		if same {
-			return
-		}
-		if err := os.RemoveAll(targetDir); err != nil {
-			log.Fatal(err)
-		}
-		if err := os.Rename(source, targetDir); err != nil {
-			log.Fatal(err)
-		}
-		log.Info("copied to ", targetDir)
-	}
-}
-
-// checkOutputDestination prevents copying onto the source or deleting its parent.
-func checkOutputDestination(source, destination string) (bool, error) {
-	sourceInfo, err := os.Stat(source)
-	if err != nil {
-		return false, err
-	}
-	destinationInfo, err := os.Stat(destination)
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if os.SameFile(sourceInfo, destinationInfo) {
-		return true, nil
-	}
-	if sourceInfo.IsDir() && destinationInfo.IsDir() {
-		sourcePath, err := filepath.EvalSymlinks(source)
-		if err != nil {
-			return false, err
-		}
-		sourcePath, err = filepath.Abs(sourcePath)
-		if err != nil {
-			return false, err
-		}
-		destinationPath, err := filepath.EvalSymlinks(destination)
-		if err != nil {
-			return false, err
-		}
-		destinationPath, err = filepath.Abs(destinationPath)
-		if err != nil {
-			return false, err
-		}
-		relative, err := filepath.Rel(destinationPath, sourcePath)
-		if err != nil {
-			return false, err
-		}
-		if relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
-			return false, E.New("output is inside sibling destination: ", source)
-		}
-	}
-	return false, nil
-}
-
-func androidArgs() []string {
 	var bindTarget string
 	if platform != "" {
 		bindTarget = platform
@@ -247,30 +107,42 @@ func androidArgs() []string {
 	}
 
 	if !debugEnabled {
-		flags := append([]string{}, sharedFlags...)
-		flags[3] += " -checklinkname=0"
-		args = append(args, flags...)
+		sharedFlags[3] = sharedFlags[3] + " -checklinkname=0"
+		args = append(args, sharedFlags...)
 	} else {
-		flags := append([]string{}, debugFlags...)
-		flags[1] += " -checklinkname=0"
-		args = append(args, flags...)
+		debugFlags[1] = debugFlags[1] + " -checklinkname=0"
+		args = append(args, debugFlags...)
 	}
 
-	tags := append(append([]string{}, sharedTags...), memcTags...)
+	tags := append(sharedTags, memcTags...)
 	if debugEnabled {
 		tags = append(tags, debugTags...)
 	}
 
 	args = append(args, "-tags", strings.Join(tags, ","))
-	if outputPath != "" {
-		args = append(args, "-o", outputPath)
-	}
 	args = append(args, "./experimental/libbox")
 
-	return args
+	command := exec.Command(build_shared.GoBinPath+"/gomobile", args...)
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
+	err = command.Run()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	const name = "libbox.aar"
+	copyPath := filepath.Join("..", "sing-box-for-android", "app", "libs")
+	if rw.IsDir(copyPath) {
+		copyPath, _ = filepath.Abs(copyPath)
+		err = rw.CopyFile(name, filepath.Join(copyPath, name))
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Info("copied to ", copyPath)
+	}
 }
 
-func appleArgs() []string {
+func buildApple() {
 	var bindTarget string
 	if platform != "" {
 		bindTarget = platform
@@ -297,7 +169,7 @@ func appleArgs() []string {
 		args = append(args, debugFlags...)
 	}
 
-	tags := append(append([]string{}, sharedTags...), darwinTags...)
+	tags := append(sharedTags, darwinTags...)
 	if withTailscale {
 		tags = append(tags, memcTags...)
 	}
@@ -306,10 +178,22 @@ func appleArgs() []string {
 	}
 
 	args = append(args, "-tags", strings.Join(tags, ","))
-	if outputPath != "" {
-		args = append(args, "-o", outputPath)
-	}
 	args = append(args, "./experimental/libbox")
 
-	return args
+	command := exec.Command(build_shared.GoBinPath+"/gomobile", args...)
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
+	err := command.Run()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	copyPath := filepath.Join("..", "sing-box-for-apple")
+	if rw.IsDir(copyPath) {
+		targetDir := filepath.Join(copyPath, "Libbox.xcframework")
+		targetDir, _ = filepath.Abs(targetDir)
+		os.RemoveAll(targetDir)
+		os.Rename("Libbox.xcframework", targetDir)
+		log.Info("copied to ", targetDir)
+	}
 }
