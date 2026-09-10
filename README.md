@@ -1,3 +1,19 @@
+# Amnezia Box
+
+Amnezia's sing-box fork with the AWG endpoint. The stable branch is `master`;
+development is integrated in `dev`. The Go module path remains
+`github.com/sagernet/sing-box`.
+
+- [Build CLI and mobile libraries](docs/amnezia/build.md)
+- [Use Go replace or a Git submodule](docs/amnezia/consumer.md)
+- [Release source tags](docs/amnezia/release.md)
+- [Maintain the fork and merge upstream changes](docs/amnezia/maintenance.md)
+
+Use `Makefile.amnezia` for Amnezia builds. The inherited `make update` resets and
+cleans source history and is **not** the fork maintenance procedure.
+
+---
+
 > Sponsored by [Warp](https://go.warp.dev/sing-box), built for coding with multiple AI agents
 
 <a href="https://go.warp.dev/sing-box">
