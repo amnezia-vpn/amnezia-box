@@ -94,7 +94,7 @@ jobs:
               "protocol/awg/TestHandshake/default",
               "protocol/awg/TestHandshake/cookies_disabled",
               "protocol/awg/TestHandshake/cookies_disabled_under_load"
-            ] | all(.[]; "github.com/sagernet/sing-box/" + . as $test |
+            ] | all(.[]; ("github.com/sagernet/sing-box/" + .) as $test |
               $passed | index($test) != null)
           ' "${RUNNER_TEMP}/awg-tests.jsonl"
       - name: Build and check the AWG endpoint
