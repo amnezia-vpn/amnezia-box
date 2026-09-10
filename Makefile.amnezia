@@ -1,0 +1,52 @@
+# Amnezia entry points; keep the inherited Makefile available for upstream work.
+.DEFAULT_GOAL := build
+
+GO ?= go
+export GOTOOLCHAIN := local
+export GOWORK := off
+
+BUILD_TAGS ?= with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_tailscale,with_awg
+TEST_TAGS ?= $(BUILD_TAGS),with_conntrack
+TEST_PACKAGES ?= ./...
+TEST_ARGS ?=
+MOBILE_TAGS ?= with_awg
+LIB_TARGET ?=
+LIB_FLAGS ?=
+VERSION ?=
+export AMNEZIA_VERSION_INPUT = $(VERSION)
+
+HOST_OS := $(shell GOTOOLCHAIN=local GOWORK=off $(GO) env GOHOSTOS)
+HOST_ARCH := $(shell GOTOOLCHAIN=local GOWORK=off $(GO) env GOHOSTARCH)
+HOST_GO = GOOS=$(HOST_OS) GOARCH=$(HOST_ARCH) $(GO)
+READ_VERSION = CGO_ENABLED=0 $(HOST_GO) run ./cmd/internal/read_amnezia_version -version "$$AMNEZIA_VERSION_INPUT"
+
+.PHONY: build test lib_android lib_apple version
+
+version:
+	@$(READ_VERSION)
+
+build: OUTPUT ?= bin/amnezia-box
+build:
+	@version=$$($(READ_VERSION)) || exit $$?; \
+	mkdir -p "$$(dirname "$(OUTPUT)")" && \
+	$(GO) build -trimpath -tags "$(BUILD_TAGS)" \
+		-ldflags "-X github.com/sagernet/sing-box/constant.Version=$$version -s -w -buildid=" \
+		-o "$(OUTPUT)" ./cmd/sing-box
+
+test:
+	$(GO) test -tags integration ./cmd/internal/read_amnezia_version ./cmd/internal/build_libbox
+	$(GO) test $(TEST_ARGS) -tags "$(TEST_TAGS)" $(TEST_PACKAGES)
+
+lib_android: OUTPUT ?= bin/libbox.aar
+lib_android:
+	@version=$$($(READ_VERSION)) || exit $$?; \
+	$(HOST_GO) run ./cmd/internal/build_libbox -target android \
+		-version "$$version" -tags "$(MOBILE_TAGS)" -platform "$(LIB_TARGET)" \
+		-output "$(OUTPUT)" -copy=false $(LIB_FLAGS)
+
+lib_apple: OUTPUT ?= bin/Libbox.xcframework
+lib_apple:
+	@version=$$($(READ_VERSION)) || exit $$?; \
+	$(HOST_GO) run ./cmd/internal/build_libbox -target apple \
+		-version "$$version" -tags "$(MOBILE_TAGS)" -platform "$(LIB_TARGET)" \
+		-output "$(OUTPUT)" -copy=false $(LIB_FLAGS)
