@@ -1,0 +1,265 @@
+package awg
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/hex"
+	E "github.com/sagernet/sing/common/exceptions"
+	"net"
+	"net/netip"
+
+	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/adapter/endpoint"
+	"github.com/sagernet/sing-box/common/dialer"
+	"github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/transport/awg"
+	"github.com/sagernet/sing/common/bufio"
+	"github.com/sagernet/sing/common/format"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
+
+	"go4.org/netipx"
+)
+
+func RegisterEndpoint(registry *endpoint.Registry) {
+	endpoint.Register(registry, constant.TypeAwg, NewEndpoint)
+}
+
+var _ adapter.InterfaceUpdateListener = (*Endpoint)(nil)
+
+type Endpoint struct {
+	*awg.Device
+	endpoint.Adapter
+	address   []netip.Prefix
+	router    adapter.Router
+	logger    log.ContextLogger
+	dnsRouter adapter.DNSRouter
+}
+
+func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.AwgEndpointOptions) (adapter.Endpoint, error) {
+	if options.MTU == 0 {
+		options.MTU = 1408
+	}
+
+	options.UDPFragmentDefault = true
+	dial, err := dialer.NewWithOptions(dialer.Options{
+		Context:        ctx,
+		Options:        options.DialerOptions,
+		RemoteIsDomain: false,
+		DirectOutbound: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var allowedPrefixBuilder netipx.IPSetBuilder
+	var excludedPrefixBuilder netipx.IPSetBuilder
+	for _, peer := range options.Peers {
+		for _, prefix := range peer.AllowedIPs {
+			allowedPrefixBuilder.AddPrefix(prefix)
+		}
+
+		if addr, err := netip.ParseAddr(peer.Address); err == nil {
+			excludedPrefixBuilder.Add(addr)
+		}
+	}
+	allowedIps, err := allowedPrefixBuilder.IPSet()
+	if err != nil {
+		return nil, err
+	}
+	excludedIps, err := excludedPrefixBuilder.IPSet()
+	if err != nil {
+		return nil, err
+	}
+
+	ipc, err := genIpcConfig(options)
+	if err != nil {
+		return nil, err
+	}
+
+	dev, err := awg.NewDevice(ctx, logger, dial, ipc, awg.DeviceOpts{
+		UseIntegratedTun: options.UseIntegratedTun,
+		Address:          options.Address,
+		AllowedIps:       allowedIps.Prefixes(),
+		ExcludedIps:      excludedIps.Prefixes(),
+		MTU:              options.MTU,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &Endpoint{
+		Device:  dev,
+		Adapter: endpoint.NewAdapterWithDialerOptions("awg", tag, []string{N.NetworkTCP, N.NetworkUDP}, options.DialerOptions),
+		address: options.Address,
+		router:  router,
+		logger:  logger,
+	}, nil
+}
+
+func genIpcConfig(opts option.AwgEndpointOptions) (string, error) {
+	privateKeyBytes, err := base64.StdEncoding.DecodeString(opts.PrivateKey)
+	if err != nil {
+		return "", err
+	}
+	s := "private_key=" + hex.EncodeToString(privateKeyBytes)
+	if opts.ListenPort != 0 {
+		s += "\nlisten_port=" + format.ToString(opts.ListenPort)
+	}
+	if opts.Jc != 0 {
+		s += "\njc=" + format.ToString(opts.Jc)
+	}
+	if opts.Jmin != 0 {
+		s += "\njmin=" + format.ToString(opts.Jmin)
+	}
+	if opts.Jmax != 0 {
+		s += "\njmax=" + format.ToString(opts.Jmax)
+	}
+	if opts.S1 != 0 {
+		s += "\ns1=" + format.ToString(opts.S1)
+	}
+	if opts.S2 != 0 {
+		s += "\ns2=" + format.ToString(opts.S2)
+	}
+	if opts.S3 != 0 {
+		s += "\ns3=" + format.ToString(opts.S3)
+	}
+	if opts.S4 != 0 {
+		s += "\ns4=" + format.ToString(opts.S4)
+	}
+	if opts.H1 != "" {
+		s += "\nh1=" + opts.H1
+	}
+	if opts.H2 != "" {
+		s += "\nh2=" + opts.H2
+	}
+	if opts.H3 != "" {
+		s += "\nh3=" + opts.H3
+	}
+	if opts.H4 != "" {
+		s += "\nh4=" + opts.H4
+	}
+	if opts.I1 != "" {
+		s += "\ni1=" + opts.I1
+	}
+	if opts.I2 != "" {
+		s += "\ni2=" + opts.I2
+	}
+	if opts.I3 != "" {
+		s += "\ni3=" + opts.I3
+	}
+	if opts.I4 != "" {
+		s += "\ni4=" + opts.I4
+	}
+	if opts.I5 != "" {
+		s += "\ni5=" + opts.I5
+	}
+	if opts.HeaderProtectionKey != "" {
+		keyBytes, err := base64.StdEncoding.DecodeString(opts.HeaderProtectionKey)
+		if err != nil {
+			return "", E.Cause(err, "decode header_protection_key")
+		}
+		s += "\nheader_protection_key=" + hex.EncodeToString(keyBytes)
+	}
+	if opts.ContentPaddingAddition != "" {
+		s += "\ncontent_padding_addition=" + opts.ContentPaddingAddition
+	}
+	if opts.RekeyAfterTime != "" {
+		s += "\nrekey_after_time=" + opts.RekeyAfterTime
+	}
+	if opts.RekeyTimeout != "" {
+		s += "\nrekey_timeout=" + opts.RekeyTimeout
+	}
+	if opts.RejectAfterTime != "" {
+		s += "\nreject_after_time=" + opts.RejectAfterTime
+	}
+	if opts.KeepaliveTimeout != "" {
+		s += "\nkeepalive_timeout=" + opts.KeepaliveTimeout
+	}
+	if opts.MaxHandshakeAttempts != "" {
+		s += "\nmax_handshake_attempts=" + opts.MaxHandshakeAttempts
+	}
+	if opts.RandomTrailers {
+		s += "\nrandom_trailers=true"
+	}
+	if opts.DisableCookies {
+		s += "\ndisable_cookies=true"
+	}
+
+	for _, peer := range opts.Peers {
+		publicKeyBytes, err := base64.StdEncoding.DecodeString(peer.PublicKey)
+		if err != nil {
+			return "", err
+		}
+		s += "\npublic_key=" + hex.EncodeToString(publicKeyBytes)
+		if peer.PresharedKey != "" {
+			presharedKeyBytes, err := base64.StdEncoding.DecodeString(peer.PresharedKey)
+			if err != nil {
+				return "", err
+			}
+			s += "\npreshared_key=" + hex.EncodeToString(presharedKeyBytes)
+		}
+		if peer.Address != "" && peer.Port != 0 {
+			s += "\nendpoint=" + peer.Address + ":" + format.ToString(peer.Port)
+		}
+		if peer.PersistentKeepaliveInterval != 0 {
+			s += "\npersistent_keepalive_interval=" + format.ToString(peer.PersistentKeepaliveInterval)
+		}
+		for _, allowedIp := range peer.AllowedIPs {
+			s += "\nallowed_ip=" + allowedIp.String()
+		}
+	}
+	return s, nil
+}
+
+func (e *Endpoint) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
+	var metadata adapter.InboundContext
+	metadata.Inbound = e.Tag()
+	metadata.InboundType = e.Type()
+	metadata.Source = source
+	metadata.Destination = destination
+	for _, addr := range e.address {
+		if addr.Contains(destination.Addr) {
+			metadata.OriginDestination = destination
+			if destination.Addr.Is4() {
+				metadata.Destination.Addr = netip.AddrFrom4([4]uint8{127, 0, 0, 1})
+			} else {
+				metadata.Destination.Addr = netip.IPv6Loopback()
+			}
+			conn = bufio.NewNATPacketConn(bufio.NewNetPacketConn(conn), metadata.OriginDestination, metadata.Destination)
+		}
+	}
+	e.logger.InfoContext(ctx, "inbound packet connection from ", source)
+	e.logger.InfoContext(ctx, "inbound packet connection to ", destination)
+	e.router.RoutePacketConnectionEx(ctx, conn, metadata, onClose)
+}
+
+func (w *Endpoint) NewConnectionEx(ctx context.Context, conn net.Conn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
+	var metadata adapter.InboundContext
+	metadata.Inbound = w.Tag()
+	metadata.InboundType = w.Type()
+	metadata.Source = source
+	for _, addr := range w.address {
+		if addr.Contains(destination.Addr) {
+			metadata.OriginDestination = destination
+			if destination.Addr.Is4() {
+				destination.Addr = netip.AddrFrom4([4]uint8{127, 0, 0, 1})
+			} else {
+				destination.Addr = netip.IPv6Loopback()
+			}
+			break
+		}
+	}
+	metadata.Destination = destination
+	w.logger.InfoContext(ctx, "inbound connection from ", source)
+	w.logger.InfoContext(ctx, "inbound connection to ", metadata.Destination)
+	w.router.RouteConnectionEx(ctx, conn, metadata, onClose)
+}
+
+func (e *Endpoint) InterfaceUpdated() {
+	if err := e.Device.BindUpdate(); err != nil {
+		e.logger.Error("rebind after interface update: ", err)
+	}
+}

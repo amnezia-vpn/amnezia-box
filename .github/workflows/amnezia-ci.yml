@@ -24,12 +24,12 @@ concurrency:
 env:
   GOTOOLCHAIN: local
   GOWORK: 'off'
-  BUILD_TAGS: with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_tailscale
+  BASE_TAGS: with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_tailscale
 
 jobs:
   quality:
-    name: Module, vet, test, and build
-    runs-on: ubuntu-latest
+    name: Module consistency and tests
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -45,9 +45,231 @@ jobs:
         run: |
           go mod tidy -diff
           go mod verify
+          (cd test && go mod tidy -diff && go mod verify)
+      - name: Test build and version helpers
+        run: go test -race -tags integration ./cmd/internal/read_amnezia_version ./cmd/internal/build_libbox
+      - name: Test release preflight gates
+        run: python3 -B -m unittest discover -s scripts/amnezia -p 'test_*.py' -v
+      - name: Compile the separate integration module
+        working-directory: test
+        # Its package init pulls Docker images; compile without executing it.
+        run: go test -c -o "${RUNNER_TEMP}/integration.test" -tags "${BASE_TAGS},with_awg,with_conntrack" .
       - name: Vet
-        run: go vet -tags "${BUILD_TAGS}" ./...
+        run: go vet -tags "${BASE_TAGS}" ./...
       - name: Test
-        run: go test -tags "${BUILD_TAGS}" -race -count=1 -shuffle=on -timeout=5m ./...
+        run: go test -tags "${BASE_TAGS}" -race -count=1 -shuffle=on -timeout=5m ./...
       - name: Build CLI
-        run: go build -trimpath -tags "${BUILD_TAGS}" -o "${RUNNER_TEMP}/sing-box" ./cmd/sing-box
+        run: go build -trimpath -tags "${BASE_TAGS}" -o "${RUNNER_TEMP}/sing-box" ./cmd/sing-box
+
+  awg:
+    name: AWG tests and race
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.25.5'
+          cache: true
+      - name: Test AWG with conntrack and race detection
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -json -tags "${BASE_TAGS},with_awg,with_conntrack" \
+            -race -count=1 -shuffle=on -timeout=5m ./transport/awg ./protocol/awg \
+            | tee "${RUNNER_TEMP}/awg-tests.jsonl"
+          # Missing build tags, removed tests, and skipped regressions must fail.
+          jq -se '
+            [ .[] | select(.Action == "pass" and .Test != null) |
+              .Package + "/" + .Test ] as $passed |
+            [
+              "transport/awg/TestDeviceBindUpdateAfterConntrackReset",
+              "transport/awg/TestBindOpenRollsBackIPv4",
+              "transport/awg/TestDeviceCloseBeforeStart/constructed",
+              "transport/awg/TestDeviceCloseBeforeStart/initialized",
+              "transport/awg/TestDeviceNetworkTunCloseBeforeStart",
+              "transport/awg/TestDeviceStartFailureClosesCore/ipc",
+              "transport/awg/TestDeviceStartFailureClosesCore/tun",
+              "transport/awg/TestDeviceStartFailureClosesCore/bind",
+              "transport/awg/TestSystemTunCloseUnblocksCore",
+              "protocol/awg/TestJSONToIPC/legacy",
+              "protocol/awg/TestJSONToIPC/awg_3_1",
+              "protocol/awg/TestInvalidHeaderProtectionKey/base64",
+              "protocol/awg/TestInvalidHeaderProtectionKey/length",
+              "protocol/awg/TestHandshake/default",
+              "protocol/awg/TestHandshake/cookies_disabled",
+              "protocol/awg/TestHandshake/cookies_disabled_under_load"
+            ] | all(.[]; ("github.com/sagernet/sing-box/" + .) as $test |
+              $passed | index($test) != null)
+          ' "${RUNNER_TEMP}/awg-tests.jsonl"
+      - name: Build and check the AWG endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          go build -trimpath -tags "${BASE_TAGS},with_awg,with_conntrack" \
+            -o "${RUNNER_TEMP}/amnezia-box" ./cmd/sing-box
+          cat > "${RUNNER_TEMP}/awg.json" <<'JSON'
+          {
+            "endpoints": [{
+              "type": "awg",
+              "tag": "awg",
+              "private_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+              "address": ["10.0.0.1/32"]
+            }]
+          }
+          JSON
+          "${RUNNER_TEMP}/amnezia-box" check -c "${RUNNER_TEMP}/awg.json"
+
+  cli:
+    name: CLI builds
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.25.5'
+          cache: true
+      - name: Build supported CLI targets with AWG
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in linux/amd64 darwin/arm64 windows/amd64; do
+            binary="${RUNNER_TEMP}/amnezia-box-${target//\//-}"
+            GOOS="${target%/*}" GOARCH="${target#*/}" CGO_ENABLED=0 \
+              make -f Makefile.amnezia build VERSION="dev-${GITHUB_SHA:0:12}" OUTPUT="$binary"
+            go version -m "$binary" | tee "${binary}.metadata"
+            grep -q 'with_awg' "${binary}.metadata"
+            grep -q 'github.com/amnezia-vpn/amneziawg-go/v3.*v3.1.20260828' "${binary}.metadata"
+          done
+          "${RUNNER_TEMP}/amnezia-box-linux-amd64" version
+
+  android:
+    name: Android library
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.25.5'
+          cache: true
+      - name: Install pinned mobile tools
+        run: |
+          go install github.com/sagernet/gomobile/cmd/gomobile@v0.1.8
+          go install github.com/sagernet/gomobile/cmd/gobind@v0.1.8
+      - name: Package Android library
+        shell: bash
+        run: |
+          set -euo pipefail
+          export JAVA_HOME="${JAVA_HOME_17_X64}"
+          export ANDROID_NDK_HOME="${ANDROID_HOME}/ndk/28.2.13676358"
+          test -d "$ANDROID_NDK_HOME"
+          make -f Makefile.amnezia lib_android VERSION="dev-${GITHUB_SHA:0:12}" OUTPUT="${RUNNER_TEMP}/libbox.aar"
+          python3 - "${RUNNER_TEMP}/libbox.aar" <<'PYTHON'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as archive:
+              expected = {f"jni/{abi}/libbox.so" for abi in ("armeabi-v7a", "arm64-v8a", "x86", "x86_64")}
+              assert expected <= set(archive.namelist()), "missing Android ABI"
+          PYTHON
+
+  apple:
+    name: Apple library
+    runs-on: macos-15
+    timeout-minutes: 40
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.25.5'
+          cache: true
+      - name: Install pinned mobile tools
+        run: |
+          go install github.com/sagernet/gomobile/cmd/gomobile@v0.1.8
+          go install github.com/sagernet/gomobile/cmd/gobind@v0.1.8
+      - name: Package Apple library
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          make -f Makefile.amnezia lib_apple VERSION="dev-${GITHUB_SHA:0:12}" OUTPUT="${RUNNER_TEMP}/Libbox.xcframework"
+          python3 - "${RUNNER_TEMP}/Libbox.xcframework/Info.plist" <<'PYTHON'
+          import plistlib, sys
+          with open(sys.argv[1], "rb") as source:
+              libraries = plistlib.load(source)["AvailableLibraries"]
+          actual = {(lib["SupportedPlatform"], arch) for lib in libraries for arch in lib["SupportedArchitectures"]}
+          assert {("ios", "arm64"), ("tvos", "arm64"), ("macos", "arm64"), ("macos", "x86_64")} <= actual
+          PYTHON
+
+  supported-builds:
+    name: Supported builds
+    if: always()
+    needs: [cli, android, apple]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require all supported builds
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: jq -e 'all(.[]; .result == "success")' <<< "$RESULTS"
+
+  consumer-remote:
+    name: consumer-remote
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.25.5'
+          cache: true
+      - name: Build an independent remote-replace consumer
+        # Go version queries only resolve commits reachable from branches/tags.
+        # PR merge results are covered by the submodule and all build/test jobs.
+        env:
+          SOURCE_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python3 scripts/amnezia/check_consumer.py remote --repository "$SOURCE_REPOSITORY" --ref "$SOURCE_SHA" --expected-sha "$SOURCE_SHA"
+
+  consumer-submodule:
+    name: consumer-submodule
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.25.5'
+          cache: true
+      - name: Clone and build an independent submodule consumer
+        env:
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          SOURCE_REF: ${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: python3 scripts/amnezia/check_consumer.py submodule --repository "$SOURCE_REPOSITORY" --ref "$SOURCE_REF" --expected-sha "$SOURCE_SHA"
