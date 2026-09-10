@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync"
 
 	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
 	"github.com/amnezia-vpn/amneziawg-go/v3/device"
@@ -27,6 +28,9 @@ type DeviceOpts struct {
 }
 
 type Device struct {
+	access    sync.Mutex
+	closed    bool
+	closeErr  error
 	awgDevice *device.Device
 	tun       tunAdapter
 	bind      conn.Bind
@@ -69,10 +73,24 @@ func NewDevice(ctx context.Context, logger logger.ContextLogger, dial network.Di
 	}, nil
 }
 
-func (d *Device) Start(stage adapter.StartStage) error {
+func (d *Device) Start(stage adapter.StartStage) (err error) {
 	if stage != adapter.StartStateStart {
 		return nil
 	}
+
+	d.access.Lock()
+	defer d.access.Unlock()
+	if d.closed {
+		return net.ErrClosed
+	}
+	if d.awgDevice != nil {
+		return nil
+	}
+	defer func() {
+		if err != nil {
+			d.closeLocked()
+		}
+	}()
 
 	d.awgDevice = device.NewDevice(d.tun, d.bind, d.logger)
 	if err := d.awgDevice.IpcSet(d.ipcConfig); err != nil {
@@ -87,15 +105,32 @@ func (d *Device) Start(stage adapter.StartStage) error {
 }
 
 func (d *Device) BindUpdate() error {
-	if d.awgDevice == nil {
+	d.access.Lock()
+	defer d.access.Unlock()
+	if d.closed || d.awgDevice == nil {
 		return nil
 	}
 	return d.awgDevice.BindUpdate()
 }
 
 func (d *Device) Close() error {
-	d.awgDevice.Close()
-	return nil
+	d.access.Lock()
+	defer d.access.Unlock()
+	return d.closeLocked()
+}
+
+// closeLocked releases the TUN directly until the core takes ownership at Start.
+func (d *Device) closeLocked() error {
+	if d.closed {
+		return d.closeErr
+	}
+	d.closed = true
+	if d.awgDevice != nil {
+		d.awgDevice.Close()
+	} else if d.tun != nil {
+		d.closeErr = d.tun.Close()
+	}
+	return d.closeErr
 }
 
 func (d *Device) DialContext(ctx context.Context, network string, destination metadata.Socksaddr) (net.Conn, error) {

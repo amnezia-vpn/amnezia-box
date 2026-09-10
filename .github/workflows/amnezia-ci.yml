@@ -51,3 +51,66 @@ jobs:
         run: go test -tags "${BUILD_TAGS}" -race -count=1 -shuffle=on -timeout=5m ./...
       - name: Build CLI
         run: go build -trimpath -tags "${BUILD_TAGS}" -o "${RUNNER_TEMP}/sing-box" ./cmd/sing-box
+
+  awg:
+    name: AWG tests and race
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.25.5'
+          cache: true
+      - name: Test AWG with conntrack and race detection
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -json -tags "${BUILD_TAGS},with_awg,with_conntrack" \
+            -race -count=1 -shuffle=on -timeout=5m ./transport/awg ./protocol/awg \
+            | tee "${RUNNER_TEMP}/awg-tests.jsonl"
+          # Missing build tags, removed tests, and skipped regressions must fail.
+          jq -se '
+            [ .[] | select(.Action == "pass" and .Test != null) |
+              .Package + "/" + .Test ] as $passed |
+            [
+              "transport/awg/TestDeviceBindUpdateAfterConntrackReset",
+              "transport/awg/TestBindOpenRollsBackIPv4",
+              "transport/awg/TestDeviceCloseBeforeStart/constructed",
+              "transport/awg/TestDeviceCloseBeforeStart/initialized",
+              "transport/awg/TestDeviceNetworkTunCloseBeforeStart",
+              "transport/awg/TestDeviceStartFailureClosesCore/ipc",
+              "transport/awg/TestDeviceStartFailureClosesCore/tun",
+              "transport/awg/TestDeviceStartFailureClosesCore/bind",
+              "transport/awg/TestSystemTunCloseUnblocksCore",
+              "protocol/awg/TestJSONToIPC/legacy",
+              "protocol/awg/TestJSONToIPC/awg_3_1",
+              "protocol/awg/TestInvalidHeaderProtectionKey/base64",
+              "protocol/awg/TestInvalidHeaderProtectionKey/length",
+              "protocol/awg/TestHandshake/default",
+              "protocol/awg/TestHandshake/cookies_disabled",
+              "protocol/awg/TestHandshake/cookies_disabled_under_load"
+            ] | all(.[]; "github.com/sagernet/sing-box/" + . as $test |
+              $passed | index($test) != null)
+          ' "${RUNNER_TEMP}/awg-tests.jsonl"
+      - name: Build and check the AWG endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          go build -trimpath -tags "${BUILD_TAGS},with_awg,with_conntrack" \
+            -o "${RUNNER_TEMP}/amnezia-box" ./cmd/sing-box
+          cat > "${RUNNER_TEMP}/awg.json" <<'JSON'
+          {
+            "endpoints": [{
+              "type": "awg",
+              "tag": "awg",
+              "private_key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+              "address": ["10.0.0.1/32"]
+            }]
+          }
+          JSON
+          "${RUNNER_TEMP}/amnezia-box" check -c "${RUNNER_TEMP}/awg.json"

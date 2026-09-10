@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"sync"
 
 	awgTun "github.com/amnezia-vpn/amneziawg-go/v3/tun"
 
@@ -21,17 +22,22 @@ import (
 )
 
 type systemTun struct {
-	mtu     uint32
-	singtun tun.Tun
-	events  chan awgTun.Event
-	name    string
-	dialer  network.Dialer
+	access   sync.Mutex
+	started  bool
+	closed   bool
+	closeErr error
+	mtu      uint32
+	singtun  tun.Tun
+	events   chan awgTun.Event
+	name     string
+	dialer   network.Dialer
 }
 
 func newSystemTun(ctx context.Context, address []netip.Prefix, allowedIps []netip.Prefix, excludedIps []netip.Prefix, mtu uint32, logger logger.Logger) (tunAdapter, error) {
 	networkManager := service.FromContext[adapter.NetworkManager](ctx)
 	name := tun.CalculateInterfaceName("")
-	events := make(chan awgTun.Event)
+	// A single startup event must not wait for the core event reader.
+	events := make(chan awgTun.Event, 1)
 
 	dial, err := dialer.NewDefault(ctx, option.DialerOptions{
 		BindInterface: name,
@@ -80,10 +86,19 @@ func newSystemTun(ctx context.Context, address []netip.Prefix, allowedIps []neti
 }
 
 func (t *systemTun) Start() error {
+	t.access.Lock()
+	defer t.access.Unlock()
+	if t.closed {
+		return net.ErrClosed
+	}
+	if t.started {
+		return nil
+	}
 	if err := t.singtun.Start(); err != nil {
 		return exceptions.Cause(err, "start tunnel")
 	}
 
+	t.started = true
 	t.events <- awgTun.EventUp
 	return nil
 }
@@ -126,8 +141,16 @@ func (t *systemTun) Events() <-chan awgTun.Event {
 }
 
 func (t *systemTun) Close() error {
+	t.access.Lock()
+	defer t.access.Unlock()
+	if t.closed {
+		return t.closeErr
+	}
+	t.closed = true
+	// Closing the OS TUN releases the core's blocking Read before it waits for exit.
+	t.closeErr = t.singtun.Close()
 	close(t.events)
-	return nil
+	return t.closeErr
 }
 
 func (t *systemTun) BatchSize() int {

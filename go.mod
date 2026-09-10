@@ -3,7 +3,7 @@ module github.com/sagernet/sing-box
 go 1.25.0
 
 require (
-	github.com/amnezia-vpn/amneziawg-go/v3 v3.1.20260814
+	github.com/amnezia-vpn/amneziawg-go/v3 v3.1.20260828
 	github.com/anytls/sing-anytls v0.0.11
 	github.com/caddyserver/certmagic v0.23.0
 	github.com/coder/websocket v1.8.13
